@@ -1,0 +1,434 @@
+--- dpavlin-perl-Mifare-MAD-707eb2c/mifare-mad.pl       2011-02-06 08:41:06.000000000 +0100
++++ dpavlin-perl-Mifare-MAD-707eb2c.mod/mifare-mad.pl   2012-06-28 10:59:36.000000000 +0200
+@@ -7,16 +7,20 @@
+ # MIFARE Application Directory (MAD)
+ # http://www.nxp.com/acrobat_download2/other/identification/MAD_overview.pdf
+ 
+-use Data::Dump qw(dump);
++use Data::Dumper;
+ 
+ my $debug = $ENV{DEBUG} || 0;
+ 
+ my $function_clusters;
+ my $mad_id;
++my $wkm_ttid;
++my $wkm_pos;
++my $wkm_line;
+ 
+ while(<DATA>) {
+        chomp;
+        next if m/^#?\s*$/;
++       $_=~s/\s+#.*//;
+        my ( $code, $function ) = split(/\s+/,$_,2);
+        my $h = '[0-9A-F]';
+        if ( $code =~ m/^($h{2})-($h{2})$/ ) {
+@@ -25,6 +29,15 @@
+                }
+        } elsif ( $code =~ m/^($h{2})$/ ) {
+                $function_clusters->{ lc $code } = $function;
++       } elsif ( $code =~ m/^WKM_TTID:($h{2})$/i ) {
++               my (undef,$ttid) = split(/:/,$code,2);
++               $wkm_ttid->{lc $ttid}=$function;
++       } elsif ( $code =~ m/^WKM_POS:($h{2})$/i ) {
++               my (undef,$pos) = split(/:/,$code,2);
++               $wkm_pos->{lc $pos}=$function;
++       } elsif ( $code =~ m/^WKM_LINE:(\d+|\d+x\d+)$/i ) {
++               my (undef,$line) = split(/:/,$code,2);
++               $wkm_line->{lc $line}=$function;
+        } elsif ( $code =~ m/^($h{4})$/ ) {
+                $mad_id->{ lc $1 } = $function;
+        } else {
+@@ -32,6 +45,10 @@
+        }
+ }
+ 
++sub bin2dec {
++    return unpack("N", pack("B32", substr("0" x 32 . shift, -32)));
++}
++
+ my $access_condition_data = {
+ 0b000 => 'R:AB W:AB I:AB DTR:AB transport conf',
+ 0b010 => 'R:AB W:-- I:-- DTR:-- r/w block',
+@@ -62,8 +79,10 @@
+ 
+ 
+ if ( $debug ) {
+-       warn "# function_clusters ",dump($function_clusters);
+-       warn "# mad_id ", dump($mad_id);
++       warn "# function_clusters ",Dumper($function_clusters);
++       warn "# mad_id ", Dumper($mad_id);
++       warn "# wkm_ttid ", Dumper($wkm_ttid);
++       warn "# wkm_line ", Dumper($wkm_line);
+ }
+ 
+ local $/ = undef;
+@@ -76,6 +95,9 @@
+ 
+ my $pos = 0;
+ 
++my $wkm=0;
++my $zdm=0;
++
+ foreach my $sector ( 0 .. 39 ) {
+ 
+        my $blocks = $sector < 32 ? 4 : 16;
+@@ -151,6 +173,7 @@
+                ;
+ 
+        my $condition = '';
++
+        foreach my $j ( 0 .. $blocks - 1 ) {
+                my $offset = $pos + $j * 0x10;
+                my $block = substr($card, $offset, 0x10);
+@@ -188,6 +211,7 @@
+ 
+                my $hex = unpack('H*',$block);
+                $hex =~ s/(....)/$1 /g;
++               $hex =~ s/0000/..../g; #/k./
+ 
+                if ( $ENV{SWAP} ) {
+                        my $hex_sw = unpack('h*',$block);
+@@ -196,6 +220,100 @@
+                }
+ 
+                printf "%x %03x  %s%s\n", $j, $offset, $hex, $condition;
++
++               # -----------------
++
++               if ($sector == 1 and $j == 0 and substr($block,0,1) eq "\x10") {
++                       $wkm = 1;
++                       my (undef,$ttid,undef,$pos,undef) = unpack('H2 H2 H8 H2 H*',$block);
++                       my ($card_b1, $card_b2, $card_b3, $card_b4) = unpack('H2 H2 H2 H2',substr($card,0,4));
++                       printf "# WKM: karta nr %03d %08d\n# WKM: [numer kontraktu %d] %s (%s) POS: %s\n", hex($card_b4), hex($card_b3 . $card_b2 . $card_b1), hex($ttid), ($wkm_ttid->{$ttid})?$wkm_ttid->{$ttid}:'kontrakt nieznany', (hex($ttid)%2==1)?'stara taryfa':'nowa taryfa',($wkm_pos->{$pos})?$wkm_pos->{$pos}:$pos;
++               }
++
++               if ($wkm and $sector == 1 and $j == 1) {
++                       my $selector = unpack('H*',substr($block,0,1));
++                       printf "# WKM: ostatnie skasowanie w sektorze %s\n", $selector+2;
++               }
++
++               if ($wkm and ($sector == 2 or $sector == 3) and $j == 0 and substr($block,0,1) eq "\x10") {
++                       my (undef,$ti,$ty,$tm,$td,$th,$tt,$vy,$vm,$vd,$vh,$vt,$vl,$vb,$vs)=unpack('A8 A8 A7 A4 A5 A5 A6 A7 A4 A5 A5 A6 A14 A10 A*',unpack('B*',$block));
++                       # print Dumper($tt,$ti,$ty,$tm,$td,$th,$tt,$vy,$vm,$vd,$vh,$vt,$vl,$vb,$vs);
++                       printf "# WKM: [skasowanie %d]\n# WKM:   kontrakt wazny do: 20%02d/%02d/%02d %02d:%02d\n# WKM:   bilet skasowany w: 20%02d/%02d/%02d %02d:%02d linia: %s %s: %s%s\n",
++                               &bin2dec($ti),
++                               &bin2dec($ty),
++                               &bin2dec($tm),
++                               &bin2dec($td),
++                               &bin2dec($th),
++                               &bin2dec($tt),
++                               &bin2dec($vy),
++                               &bin2dec($vm),
++                               &bin2dec($vd),
++                               &bin2dec($vh),
++                               &bin2dec($vt),
++                               # &bin2dec($vl),
++                               ($wkm_line->{&bin2dec($vl)})?$wkm_line->{&bin2dec($vl)}:&bin2dec($vl),
++                               # &bin2dec($vb),
++                               ($wkm_line->{(&bin2dec($vl).'x'.&bin2dec($vb))})?'stacja':'brygada',
++                               ($wkm_line->{(&bin2dec($vl).'x'.&bin2dec($vb))})?$wkm_line->{(&bin2dec($vl).'x'.&bin2dec($vb))}:&bin2dec($vb),
++                               ($vs>0)?(' extra dane: '.&bin2dec($vs)):'';
++               }
++
++               # -----------------
++
++               if ($sector == 7 and $j == 0 and substr($block,0,2) eq "\x01\x01") {
++                       $zdm = 1;
++                       my (undef, # trailer \x01\x01
++                           $loadno,
++                           undef, # always \x00
++                           $loadday,
++                           $loadmonth,
++                           $loadyear,
++                           $validday,
++                           $validmonth,
++                           $validyear,
++                           $pos_group,
++                           $pos_no,
++                           $unknown1,
++                           $unknown2) # ???
++                               = unpack('v c c c c v c c v c c H2 H2', $block);
++                       printf "# ZDM: karta zaladowana %d raz, data ladowania: %04d/%02d/%02d, data waznosci %04d/%02d/%02d, punkt sprzedazy: %03d\\%d extra 2 bajty: %s %s\n", $loadno, $loadyear, $loadmonth, $loadday, $validyear, $validmonth, $validday, $pos_no, $pos_group, $unknown1, $unknown2;
++               }
++
++               if ($zdm and $sector == 7 and ($j == 1 or $j == 2)) {
++                       my ($credits1,
++                           $const_0000,
++                           $checksum,
++                           $const_ffff,
++                           $credits2,
++                           $const_000000ff00ff)
++                               = unpack ('v H4 v H4 v H12', $block);
++                       printf "# ZDM: Unexpected value %s - should be 0000\n", $const_0000 if $const_0000 ne '0000';
++                       printf "# ZDM: Unexpected value %s - should be ffff\n", $const_ffff if $const_ffff ne 'ffff';
++                       printf "# ZDM: Unexpected value %s - should be 000000ff00ff\n", $const_000000ff00ff if $const_000000ff00ff ne '000000ff00ff';
++                       printf "# ZDM: Credits mismatch\n" if $credits1 ne $credits2;
++                       printf "# ZDM: Verify mismatch\n" if 65535 - $credits1 ne $checksum; # (0xffff - credits = checksum)
++                       printf "# ZDM: [%s] %.2f zl\n", ($j==1)?'srodki na karcie':'wartosc doladowania', $credits1/10;
++               }
++
++               if ($zdm and $sector == 8 and $j == 0) {
++                       my ($transday,
++                           $transmonth,
++                           $unknown1,
++                           $transhour,
++                           $transminute,
++                           $const1,
++                           $transno,
++                           $transval,
++                           $const2,
++                           $transid,
++                           $unknown2)
++                               = unpack ('c c H2 c c H6 c v H4 v H2', $block);
++                       printf "# ZDM: Unexpected value %s - should be 000000\n", $const1 if $const1 ne '000000';
++                       printf "# ZDM: Unexpected value %s - should be 0000\n", $const2 if $const2 ne '0000';
++                       printf "# ZDM: [ostatnia tranzakcja] dzien=%02d miesiac=%02d godzina=%02d:%02d numer=%d identyfikator=%d oplata=%.2f zl, extra 2 bajty: %s %s\n", $transday, $transmonth, $transhour, $transminute, $transno, $transid, $transval/10, $unknown1, $unknown2 if $transval ne 0;
++               }
++
++               # -----------------
+        }
+ 
+        printf "KEY A:%s | %s GDP: %s | B:%s %s\n"
+@@ -292,3 +410,243 @@
+ 887C - electronic purse MIKROELEKTRONIKA spol.s.r. MIKROELEKTRONIKA spol.s.r.o. Europe         4 01.05.2009 electronic purse
+ 887D - electronic purse Mikroelektronika spol.s r.o Mikroelektronika spol.s r.o EUROPE,Czech R 4 01.08.2009 Electronic purse
+ 
++WKM_TTID:00 czysty bilet
++WKM_TTID:02 bilet jednorazowy strefa 1, normalny
++WKM_TTID:16 bilet dobowy strefa 1, normalny
++WKM_TTID:18 bilet trzydniowy strefa 1, normalny
++WKM_TTID:21 bilet dobowy strefa 1, normalny (nowa)
++WKM_TTID:22 bilet trzydniowy strefa 1, normalny
++WKM_TTID:23 bilet dobowy strefa 1, normalny
++WKM_TTID:24 bilet trzydniowy strefa 1, normalny
++WKM_TTID:25 bilet siedmiodniowy strefa 1, normalny
++WKM_TTID:27 bilet 14-dniowy strefa 1, normalny
++WKM_TTID:29 bilet 30-dniowy imienny na 1 linie strefa 1, normalny
++WKM_TTID:2a bilet 30-dniowy imienny na wszystkie linie strefa 1, normalny
++WKM_TTID:2b bilet 30-dniowy imienny na wszystkie linie strefa 1, normalny
++WKM_TTID:2e bilet 90-dniowy imienny na wszystkie linie strefa 1, normalny
++WKM_TTID:2f bilet 90-dniowy imienny na wszystkie linie strefa 1, normalny
++WKM_TTID:34 bilet jednorazowy strefa 1, ulgowy 50
++WKM_TTID:48 bilet dobowy strefa 1, ulgowy 50
++WKM_TTID:4a bilet trzydniowy strefa 1, ulgowy 50
++WKM_TTID:53 bilet dobowy strefa 1, ulgowy 50
++WKM_TTID:54 bilet trzydniowy strefa 1, ulgowy 50
++WKM_TTID:55 bilet dobowy strefa 1, ulgowy 50
++WKM_TTID:56 bilet trzydniowy strefa 1, ulgowy 50
++WKM_TTID:57 bilet siedmiodniowy strefa 1, ulgowy 50
++WKM_TTID:59 bilet 14-dniowy strefa 1, ulgowy 50
++WKM_TTID:5b bilet 30-dniowy imienny na 1 linie strefa 1, ulgowy 50
++WKM_TTID:5c bilet 30-dniowy imienny na wszystkie linie strefa 1, ulgowy 50
++WKM_TTID:5d bilet 30-dniowy imienny na wszystkie linie strefa 1, ulgowy 50
++WKM_TTID:60 bilet 90-dniowy imienny na wszystkie linie strefa 1, ulgowy 50
++WKM_TTID:61 bilet 90-dniowy imienny na wszystkie linie strefa 1, ulgowy 50
++WKM_TTID:66 bilet jednorazowy strefa 1+2, normalny
++WKM_TTID:6f bilet 20 minutowy strefa 1+2, normalny
++WKM_TTID:70 bilet 40 minutowy strefa 1+2, normalny
++WKM_TTID:71 bilet 60 minutowy strefa 1+2, normalny
++WKM_TTID:7a bilet dobowy strefa 1+2, normalny
++WKM_TTID:7c bilet trzydniowy strefa 1+2, normalny
++WKM_TTID:85 bilet dobowy strefa 1+2, normalny
++WKM_TTID:86 bilet trzydniowy strefa 1+2, normalny
++WKM_TTID:87 bilet dobowy strefa 1+2, normalny
++WKM_TTID:88 bilet trzydniowy strefa 1+2, normalny
++WKM_TTID:89 bilet siedmiodniowy strefa 1+2, normalny
++WKM_TTID:8b bilet 14-dniowy strefa 1+2, normalny
++WKM_TTID:8d bilet 30-dniowy imienny na 1 linie strefa 1+2, normalny
++WKM_TTID:8e bilet 30-dniowy imienny na wszystkie linie strefa 1+2, normalny
++WKM_TTID:8f bilet 30-dniowy imienny na wszystkie linie strefa 1+2, normalny
++WKM_TTID:90 bilet 30-dniowy na okaziciela na wszystkie linie strefa 1+2, normalny
++WKM_TTID:91 bilet 30-dniowy na okaziciela na wszystkie linie strefa 1+2, normalny
++WKM_TTID:92 bilet 90-dniowy imienny na wszystkie linie strefa 1+2, normalny
++WKM_TTID:93 bilet 90-dniowy imienny na wszystkie linie strefa 1+2, normalny
++WKM_TTID:94 bilet 90-dniowy na okaziciela na wszystkie linie strefa 1+2, normalny
++WKM_TTID:95 bilet 90-dniowy na okaziciela na wszystkie linie strefa 1+2, normalny
++WKM_TTID:96 bilet seniora, waşny 365 dni na wszystkie linie strefa 1+2
++WKM_TTID:98 bilet jednorazowy strefa 1+2, ulgowy
++WKM_TTID:a1 bilet 20 minutowy strefa 1+2, ulgowy
++WKM_TTID:a2 bilet 40 minutowy strefa 1+2, ulgowy
++WKM_TTID:a3 bilet 60 minutowy strefa 1+2, ulgowy
++WKM_TTID:ac bilet dobowy strefa 1+2, ulgowy
++WKM_TTID:ae bilet trzydniowy strefa 1+2, ulgowy
++WKM_TTID:b7 bilet dobowy strefa 1+2, ulgowy
++WKM_TTID:b8 bilet trzydniowy strefa 1+2, ulgowy
++WKM_TTID:b9 bilet dobowy strefa 1+2, ulgowy
++WKM_TTID:ba bilet trzydniowy strefa 1+2, ulgowy
++WKM_TTID:bb bilet siedmiodniowy strefa 1+2, ulgowy
++WKM_TTID:bd bilet 14-dniowy strefa 1+2, ulgowy
++WKM_TTID:bf bilet 30-dniowy imienny na 1 linie strefa 1+2, ulgowy
++WKM_TTID:c0 bilet 30-dniowy imienny na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c1 bilet 30-dniowy imienny na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c2 bilet 30-dniowy na okaziciela na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c3 bilet 30-dniowy na okaziciela na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c4 bilet 90-dniowy imienny na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c5 bilet 90-dniowy imienny na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c6 bilet 90-dniowy na okaziciela na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:c7 bilet 90-dniowy na okaziciela na wszystkie linie strefa 1+2, ulgowy
++WKM_TTID:d2 ??? 210 bilet nieznany - pokazuje wersje kasownika bez blokowania (pracowniczy?) - waşny 3 lata od skasowania
++WKM_TTID:d3 "przepustka na stacje metra" (pasazerska/HDK/70+)
++WKM_TTID:d4 "przepustka na stacje metra" (pasazerska/HDK/70+)
++WKM_TTID:d6 "przepustka na stacje metra" (SOM/policja/obsluga techniczna), waşny rok od skasowania
++WKM_TTID:dd "ZTM pass - karta testowa", waşny rok od skasowania
++WKM_TTID:e7 bilet pracowniczy ZTM, waşny rok od skasowania
++WKM_TTID:e8 bilet pracowniczy MZA, waşny rok od skasowania
++WKM_TTID:e9 bilet pracowniczy TW, waşny rok od skasowania
++WKM_TTID:ea bilet pracowniczy MW, waşny rok od skasowania
++WKM_TTID:eb bilet pracowniczy SKM, waşny rok od skasowania
++WKM_TTID:ef bilet dzieci z rodzin wielodzietnych, waşny rok od skasowania
++WKM_TTID:f0 bilet osoby niepe�?nosprawnej, waşny rok od skasowania
++WKM_TTID:f5 ??? 245 bilet nieznany - "poza dozwolonym terminem uzycia"
++WKM_TTID:fa "precode" (nie rozpoznawany przez kasowniki)
++WKM_TTID:fe "navette" (karta kontrolerska)
++WKM_TTID:ff admin
++
++WKM_POS:01 POP ZTM
++WKM_POS:15 Mennica
++WKM_POS:2a ASEC
++
++WKM_LINE:81 WKD # prooved
++
++WKM_LINE:91 METRO LINIA 1 # prooved
++WKM_LINE:91x1 Kabaty # prooved
++WKM_LINE:91x2 Natolin # prooved
++WKM_LINE:91x3 Imielin # prooved
++WKM_LINE:91x4 Stoklosy # prooved
++WKM_LINE:91x5 Ursynow # prooved
++WKM_LINE:91x6 Sluzew # prooved
++WKM_LINE:91x7 Wilanowska # prooved
++WKM_LINE:91x8 Wierzbno # prooved
++WKM_LINE:91x9 Raclawicka # prooved
++WKM_LINE:91x10 Pole Mokotowskie # prooved
++WKM_LINE:91x11 Politechnika # prooved
++WKM_LINE:91x12 Centrum # prooved
++WKM_LINE:91x13 Swietokrzyska # prooved
++WKM_LINE:91x14 Ratusz Arsenal # prooved
++WKM_LINE:91x15 Dw. Gdanski # prooved
++WKM_LINE:91x16 Pl. Wilsona # prooved
++WKM_LINE:91x17 Marymont # prooved
++WKM_LINE:91x18 Slodowiec # prooved
++WKM_LINE:91x19 Stare Bielany # prooved
++WKM_LINE:91x20 Wawrzyszew # prooved
++WKM_LINE:91x21 Mlociny # prooved
++WKM_LINE:92 METRO LINIA 2 # guess
++
++WKM_LINE:1001 Z-1 # guess
++WKM_LINE:2901 Z-1 # prooved
++WKM_LINE:1005 Z-5 # prooved (wk)
++WKM_LINE:2905 Z-5 # prooved (wk)
++WKM_LINE:1009 Z-9 # prooved
++WKM_LINE:2909 Z-9 # guess
++WKM_LINE:1019 Z19 # guess
++WKM_LINE:2919 Z19 # guess
++WKM_LINE:1019 Z19 # guess
++WKM_LINE:2919 Z19 # guess
++
++WKM_LINE:3001 L-1 # guess
++WKM_LINE:3002 L-2 # guess
++WKM_LINE:3003 L-3 # guess
++WKM_LINE:3004 L-4 # guess
++WKM_LINE:3005 L-5 # guess
++WKM_LINE:3006 L-6 # guess
++WKM_LINE:3007 L-7 # prooved (wk)
++WKM_LINE:3008 L-8 # guess
++WKM_LINE:3009 L-9 # guess
++WKM_LINE:3010 L10 # guess
++WKM_LINE:3011 L11 # guess
++WKM_LINE:3013 L13 # guess
++WKM_LINE:3014 L14 # guess
++WKM_LINE:3015 L15 # guess
++WKM_LINE:3016 L16 # guess
++WKM_LINE:3017 L17 # guess
++WKM_LINE:3018 L18 # guess
++
++WKM_LINE:601 N01  # guess
++WKM_LINE:6001 N01 # guess
++WKM_LINE:602 N02  # guess
++WKM_LINE:6002 N02 # guess
++WKM_LINE:603 N03  # guess
++WKM_LINE:6003 N03 # guess
++WKM_LINE:611 N11  # guess
++WKM_LINE:6011 N11 # prooved
++WKM_LINE:612 N12  # guess
++WKM_LINE:6012 N12 # guess
++WKM_LINE:613 N13  # guess
++WKM_LINE:6013 N13 # prooved
++WKM_LINE:614 N14  # guess
++WKM_LINE:6014 N14 # guess
++WKM_LINE:622 N22  # guess
++WKM_LINE:6022 N22 # guess
++WKM_LINE:624 N24  # guess
++WKM_LINE:6024 N24 # prooved
++WKM_LINE:625 N25  # guess
++WKM_LINE:6025 N25 # prooved
++WKM_LINE:631 N31  # guess
++WKM_LINE:6031 N31 # prooved
++WKM_LINE:632 N32  # guess
++WKM_LINE:6032 N32 # prooved
++WKM_LINE:633 N33  # guess
++WKM_LINE:6033 N33 # prooved
++WKM_LINE:634 N34  # guess
++WKM_LINE:6034 N34 # prooved
++WKM_LINE:635 N35  # guess
++WKM_LINE:6035 N35 # prooved
++WKM_LINE:636 N36  # guess
++WKM_LINE:6036 N36 # prooved
++WKM_LINE:637 N37  # prooved
++WKM_LINE:6037 N37 # guess
++WKM_LINE:638 N38  # guess
++WKM_LINE:6038 N38 # guess
++WKM_LINE:641 N41  # guess
++WKM_LINE:6041 N41 # guess
++WKM_LINE:642 N42  # prooved
++WKM_LINE:6042 N42 # guess
++WKM_LINE:643 N43  # guess
++WKM_LINE:6043 N43 # prooved
++WKM_LINE:644 N44  # guess
++WKM_LINE:6044 N44 # prooved
++WKM_LINE:645 N45  # guess
++WKM_LINE:6045 N45 # guess
++WKM_LINE:646 N46  # prooved
++WKM_LINE:6046 N46 # guess
++WKM_LINE:650 N50  # guess
++WKM_LINE:6050 N50 # guess
++WKM_LINE:652 N52  # guess
++WKM_LINE:6052 N52 # guess
++WKM_LINE:653 N53  # guess
++WKM_LINE:6053 N53 # guess
++WKM_LINE:658 N58  # guess
++WKM_LINE:6058 N58 # guess
++WKM_LINE:661 N61  # guess
++WKM_LINE:6061 N61 # guess
++WKM_LINE:662 N62  # prooved
++WKM_LINE:6062 N62 # guess
++WKM_LINE:663 N63  # guess
++WKM_LINE:6063 N63 # guess
++WKM_LINE:664 N64  # guess
++WKM_LINE:6064 N64 # guess
++WKM_LINE:671 N71  # guess
++WKM_LINE:6071 N71 # prooved
++WKM_LINE:672 N72  # guess
++WKM_LINE:6072 N72 # prooved
++WKM_LINE:675 N75  # guess
++WKM_LINE:6075 N75 # guess
++WKM_LINE:681 N81  # guess
++WKM_LINE:6081 N81 # guess
++WKM_LINE:683 N83  # guess
++WKM_LINE:6083 N83 # guess
++WKM_LINE:685 N85  # guess
++WKM_LINE:6085 N85 # guess
++WKM_LINE:688 N88  # guess
++WKM_LINE:6088 N88 # guess
++WKM_LINE:691 N91  # guess
++WKM_LINE:6091 N91 # guess
++WKM_LINE:695 N95  # guess
++WKM_LINE:6095 N95 # guess
++
++WKM_LINE:9002 E-2 # prooved (wk)
++WKM_LINE:9004 E-4 # guess
++WKM_LINE:9006 E-6 # guess
++WKM_LINE:9008 E-8 # guess
++
++WKM_LINE:9101 S1 # prooved
++WKM_LINE:9102 S2 # guessed
++WKM_LINE:9109 S9 # guessed
